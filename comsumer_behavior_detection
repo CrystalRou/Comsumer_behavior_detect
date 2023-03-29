@@ -1,0 +1,667 @@
+#!/usr/bin/env python
+import os
+import sys
+import argparse
+import json
+import shutil
+import time
+
+import numpy as np
+import torch
+import skvideo.io
+
+from .io import IO
+import tools
+import tools.utils as utils
+
+import cv2
+from sys import platform
+
+import face_recognition
+import cv2
+import numpy as np
+
+import shutil
+import os, sys
+from os.path import join as pjoin
+
+import tensorflow as tf
+import fnmatch
+
+
+class DemoRealtime(IO):
+    """ A demo for utilizing st-gcn in the realtime action recognition.
+    The Openpose python-api is required for this demo.
+
+    Since the pre-trained model is trained on videos with 30fps,
+    and Openpose is hard to achieve this high speed in the single GPU,
+    if you want to predict actions by **camera** in realtime,
+    either data interpolation or new pre-trained model
+    is required.
+
+    Pull requests are always welcome.
+    """
+    def start(self):
+        # load openpose python api
+        dir_path = 'D:/openpose/build/examples/tutorial_api_python'
+        try:
+            # Windows Import
+            if platform == "win32":
+                # Change these variables to point to the correct folder (Release/x64 etc.)
+                sys.path.append(dir_path + '/../../python/openpose/Release');
+                os.environ['PATH']  = os.environ['PATH'] + ';' + dir_path + '/../../x64/Release;' +  dir_path + '/../../bin;'
+                import pyopenpose as op
+            else:
+                # Change these variables to point to the correct folder (Release/x64 etc.)
+                sys.path.append('D:/openpose/build/python');
+                # If you run `make install` (default path is `/usr/local/python` for Ubuntu), you can also access the OpenPose/python module from there. This will install OpenPose and the python library at your desired installation path. Ensure that this is in your python path in order to use it.
+                # sys.path.append('/usr/local/python')
+                from openpose import pyopenpose as op
+        except ImportError as e:
+            print('Error: OpenPose library could not be found. Did you enable `BUILD_PYTHON` in CMake and have this Python script in the right folder?')
+            raise e
+
+        video_name = self.arg.video.split('/')[-1].split('.')[0]
+        label_name_path = './resource/kinetics_skeleton/label_name.txt'
+        with open(label_name_path) as f:
+            label_name = f.readlines()
+            label_name = [line.rstrip() for line in label_name]
+            self.label_name = label_name
+
+        # initiate
+        opWrapper = op.WrapperPython()
+        params = dict(model_folder='./models', model_pose='COCO')
+        opWrapper.configure(params)
+        opWrapper.start()
+        self.model.eval()
+        pose_tracker = naive_pose_tracker()
+        #物品辨識
+        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+        sess = tf.InteractiveSession()
+        # Loads label file, strips off carriage return
+        label_lines = [line.rstrip() for line
+                       in tf.gfile.GFile("D:/candy-or-medicine-classifier/retrained_labels.txt")]
+        # Unpersists graph from file
+        with tf.gfile.FastGFile("D:/candy-or-medicine-classifier/retrained_graph.pb", 'rb') as f:
+            graph_def = tf.GraphDef()
+            graph_def.ParseFromString(f.read())
+            tf.import_graph_def(graph_def, name='')
+        # Feed the image_data as input to the graph and get first prediction
+        softmax_tensor = sess.graph.get_tensor_by_name('final_result:0')
+        #初始化物件辨識要用到的東西
+        top_k = list(range(len(label_lines))) #這樣是list(range(3)) [0,1,2]
+        top_k2 = list(range(len(label_lines)))
+
+        #物品辨識初始化結束
+
+        sequence1right = []
+        sequence2left = []
+        twice1right = False
+        twice2left = False
+        buf1right = ''
+        buf2left = ''
+        str1right = ''
+        str2left = ''
+        stage1right = ''
+        stage2left = ''
+        i1right = 0
+        i2left = 0
+        #拿出來放回去初始化結束
+        
+
+        rou_image = face_recognition.load_image_file("rou.jpg")
+        rou_face_encoding = face_recognition.face_encodings(rou_image)[0]
+
+        yvonne_image = face_recognition.load_image_file("yvonne.jpg")
+        yvonne_face_encoding = face_recognition.face_encodings(yvonne_image)[0]
+
+        parker_image = face_recognition.load_image_file("parker.jpg")
+        parker_face_encoding = face_recognition.face_encodings(parker_image)[0]
+        
+        known_face_encodings = [
+            rou_face_encoding,
+            yvonne_face_encoding,
+            parker_face_encoding
+    
+        ]
+        known_face_names = [
+            "Rou",
+            "Yvonne",
+            "Parker"
+        ]
+ 
+        if self.arg.video == 'camera_source':
+            video_capture = cv2.VideoCapture(1)
+        else:
+            video_capture = cv2.VideoCapture(self.arg.video)
+            
+            
+        # This is a super simple (but slow) example of running face recognition on live video from your webcam.
+        # There's a second example that's a little more complicated but runs faster.
+
+        # PLEASE NOTE: This example requires OpenCV (the `cv2` library) to be installed only to read from your webcam.
+        # OpenCV is *not* required to use the face_recognition library. It's only required if you want to run this
+        # specific demo. If you have trouble installing it, try any of the other demos that don't require it instead.
+
+        # Get a reference to webcam #0 (the default one)
+        video_capture1 = cv2.VideoCapture(0)                  
+                
+        start_time = time.time()
+        frame_index = 0
+        photonum = 1 #我改，因為要三個一數
+        #存前兩張商品圖的label
+        votingLabel_save = list(range(2))
+        votingLabel_count = 0
+        face_name = " "
+        while (True):
+            # Grab a single frame of video
+            # get image
+            ret, frame = video_capture1.read() #face
+            ret2, orig_image = video_capture.read() #body
+            if orig_image is None:
+                break
+            tic = time.time()
+            
+          
+            source_H, source_W, _ = orig_image.shape
+            # Convert the image from BGR color (which OpenCV uses) to RGB color (which face_recognition uses)
+            rgb_frame = frame[:, :, ::-1]
+            
+            # Find all the faces and face enqcodings in the frame of video
+            face_locations = face_recognition.face_locations(rgb_frame)
+            face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+
+            # Loop through each face in this frame of video
+            for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
+                # See if the face is a match for the known face(s)
+                matches = face_recognition.compare_faces(known_face_encodings, face_encoding, tolerance=0.4)
+
+                name = "Unknown"
+
+                # If a match was found in known_face_encodings, just use the first one.
+                # if True in matches:
+                #     first_match_index = matches.index(True)
+                #     name = known_face_names[first_match_index]
+
+                # Or instead, use the known face with the smallest distance to the new face
+                face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
+                best_match_index = np.argmin(face_distances)
+                if matches[best_match_index]:
+                    name = known_face_names[best_match_index]             
+                    face_name = name
+                # Draw a box around the face
+                cv2.rectangle(frame, (left, top), (right, bottom), (0, 0, 255), 2)
+
+                # Draw a label with a name below the face
+                cv2.rectangle(frame, (left, bottom - 35), (right, bottom), (0, 0, 255), cv2.FILLED)
+                font = cv2.FONT_HERSHEY_DUPLEX
+                cv2.putText(frame, name, (left + 6, bottom - 6), font, 1.0, (255, 255, 255), 1)
+            # Display the resulting image
+            cv2.resizeWindow("Video", 480, 360);
+            cv2.moveWindow("Video", 1450, 0)
+            cv2.imshow('Video', frame)
+            
+            datum = op.Datum()
+            datum.cvInputData = orig_image
+            opWrapper.emplaceAndPop([datum])
+            multi_pose = datum.poseKeypoints  # (num_person, num_joint, 3)
+            if len(multi_pose.shape) != 3:
+                continue
+
+            # normalization
+            multi_pose[:, :, 0] = multi_pose[:, :, 0]/source_W
+            multi_pose[:, :, 1] = multi_pose[:, :, 1]/source_H
+            multi_pose[:, :, 0:2] = multi_pose[:, :, 0:2] - 0.5
+            multi_pose[:, :, 0][multi_pose[:, :, 2] == 0] = 0
+            multi_pose[:, :, 1][multi_pose[:, :, 2] == 0] = 0
+            # pose tracking
+            if self.arg.video == 'camera_source':
+                self.arg.fps = 120
+                frame_index = int((time.time() - start_time)*self.arg.fps)
+            else:
+                frame_index += 1
+            pose_tracker.update(multi_pose, frame_index)
+            data_numpy = pose_tracker.get_skeleton_sequence()
+            data = torch.from_numpy(data_numpy)
+            data = data.unsqueeze(0)
+            data = data.float().to(self.dev).detach()  # (1, channel, frame, joint, person)
+
+            # model predict
+            voting_label_name, video_label_name, output, intensity = self.predict(
+                data)
+                
+            #儲存前兩張的voting_label結果
+            votingLabel_save[votingLabel_count] = voting_label_name
+            if(votingLabel_count == 0):
+                votingLabel_count += 1
+            
+            #right 裁切區域的 x 與 y 座標（左上角）
+            myphotonum = str(photonum)
+            #print(datum.poseKeypoints[0][4][:-1]) #第4個點的x,y,信賴
+            #print(datum.poseKeypoints[0][7][:-1])
+            x = int(datum.poseKeypoints[0][4][0])-160
+            y = int(datum.poseKeypoints[0][4][1])-100
+            #裁切區域的長度與寬度
+            w = 200
+            h = 200
+            # 裁切圖片
+            RightHand_img = orig_image[y:y+h, x:x+w]
+            if (RightHand_img.size ==  0):#对于这种情况就不要用imwriter
+                continue
+            else:
+                #if photonum % 3 == 1:
+                cv2.imwrite('D:/st-gcn/detectPhoto/'+ myphotonum +'_detectitem_Right.jpg', RightHand_img)
+
+            #left 裁切區域的 x 與 y 座標（左上角）
+            x2 = int(datum.poseKeypoints[0][7][0])-160
+            y2 = int(datum.poseKeypoints[0][7][1])-100
+            #裁切區域的長度與寬度
+            w2 = 200
+            h2 = 200
+            # 裁切圖片
+            LeftHand_img = orig_image[y2:y2+h2, x2:x2+w2]
+            if (LeftHand_img.size ==  0):#对于这种情况就不要用imwriter
+                continue
+            else:
+                cv2.imwrite('D:/st-gcn/detectPhoto/'+ myphotonum +'_detectitem_Left.jpg', LeftHand_img)
+
+            if photonum % 3 == 0: #集滿(兩手各)三個圖片才做一次
+                votingLabel_count = 0 #幫votingLabel_save[] reset
+                k = 0
+                while( k < 6 ):#執行六次(0~5)
+                    #讀檔
+                    dirpath = 'D:/st-gcn/detectPhoto/' #改 換新的影片dir
+                    if(k == 0):
+                        image_path = dirpath+ str(photonum-2) +'_detectitem_Left.jpg'
+                        label_name_forstate = votingLabel_save[0]
+                    if(k == 1):
+                        image_path = dirpath+ str(photonum-1) +'_detectitem_Left.jpg'
+                        label_name_forstate = votingLabel_save[1]
+                    if(k == 2):
+                        image_path = dirpath+ str(photonum) +'_detectitem_Left.jpg'
+                        label_name_forstate = voting_label_name
+                    if(k == 3):
+                        image_path = dirpath+ str(photonum-2) +'_detectitem_Right.jpg'
+                        label_name_forstate = votingLabel_save[0]
+                    if(k == 4):
+                        image_path = dirpath+ str(photonum-1) +'_detectitem_Right.jpg'
+                        label_name_forstate = votingLabel_save[1]
+                    if(k == 5):
+                        image_path = dirpath+ str(photonum) +'_detectitem_Right.jpg'
+                        label_name_forstate = voting_label_name
+                    
+                    
+                    image_data = tf.gfile.FastGFile(image_path, 'rb').read()
+                    predictions = sess.run(softmax_tensor, \
+                                           {'DecodeJpeg/contents:0': image_data})
+
+                    #比對檔名(ex.檔名裡面有left的要給top_k2、right要給top_k)
+                    if fnmatch.fnmatch(image_path, '*_detectitem_Right.jpg'): #if檔名是right         
+                        top_k = predictions[0].argsort()[-len(predictions[0]):][::-1]# Sort to show labels of first prediction in order of confidence
+                        #for拿出來放回去 跟在物辨後面(反正stage就是一個一個input) 
+                        #str1right = label_lines[top_k[0]]
+                        if(label_name_forstate == 'liftThelid'): #進入state OF or ON
+                            if(label_lines[top_k[0]].find('nothing') == -1): #沒有找到空，就是有food
+                                str1right = 'OF'
+                            else:
+                                str1right = 'ON'
+                        else: #不是則沒開蓋，進入state NF or NN
+                            if(label_lines[top_k[0]].find('nothing') == -1): #沒有找到空，就是有food
+                                str1right = 'NF'
+                            else:
+                                str1right = 'NN'
+                        print('Right：',label_lines[top_k[0]])
+                        if(i1right == 0):
+                            sequence1right.append(str1right)
+                            stage1right = "Right:Init"
+                            print(stage1right)
+                            i1right+=1
+                        elif(i1right == 1): #!=0的才能開始比較i1right-1
+                            if(str1right == sequence1right[i1right-1]):
+                                twice1right = True #因為stage一樣所以sequence保持原樣，buf也是不動作
+                            else: #str != sequence[i-1]，twice = False、sequence不動(不appand)，新增buf
+                                twice1right = False
+                                buf1right = str1right
+                            i1right+=1
+                        else: 
+                            if(twice1right == True):#代表上一個沒有放buf，新的要跟seq比
+                                if(str1right == sequence1right[len(sequence1right)-1]): #twice = True
+                                    twice1right = True #因為stage一樣所以sequence保持原樣，buf也是不動作
+                                else: #str != sequence[i-1]，twice = False、sequence不動(不appand)，新增buf
+                                    twice1right = False
+                                    buf1right = str1right
+                            else: #twice = False，代表上一個有buf要跟新的作比對
+                                if(str1right == buf1right): 
+                                    twice1right = True
+                                    if(buf1right != sequence1right[len(sequence1right)-1]): #防止eeeleee = ['e','e']
+                                        sequence1right.append(str1right)
+                                else: #str != buf
+                                    #twice = False，狀態不變就不打了
+                                    buf1right = str1right #buf換人，前一個stage就作廢了<不滿兩次>
+                        print(sequence1right)
+                        if(len(sequence1right) == 3): #集滿3個stage的值之後再來判斷
+                            if(sequence1right == ['NN', 'ON', 'OF']):
+                                #print("Take out")
+                                stage1right = "Right:Take out"
+                            elif(sequence1right == ['NF', 'OF', 'ON']): #NF可以想一下要不要改成NN 因為NF的難度又更難了
+                                #print("Put back")
+                                stage1right = "Right:Put back"
+                            else:
+                                #print("error")
+                                stage1right = "Right: " #先跳過[e,e] [f,f]狀態 看之後要不要用stack儲存連續判定狀況(ex[take,put,put,(中間[e,e]...之類的)])
+                                #continue #跳過此句後剩下的語句，開啟新的循環
+                                pass #不執行東西       
+                            print(stage1right)
+                            sequence1right.pop(0) #最前面的偵測值pop掉，來檢測下一個狀態
+
+                    if fnmatch.fnmatch(image_path, '*_detectitem_Left.jpg'): #if檔名是left
+                        top_k2 = predictions[0].argsort()[-len(predictions[0]):][::-1]# Sort to show labels of first prediction in order of confidence
+                        #for拿出來放回去 跟在物辨後面(反正stage就是一個一個input)
+                        #str2left = label_lines[top_k2[0]]
+                        if(label_name_forstate == 'liftThelid'): #進入state OF or ON
+                            if(label_lines[top_k2[0]].find('nothing') == -1): #沒有找到空，就是有food
+                                str2left = 'OF'
+                            else:
+                                str2left = 'ON'
+                        else: #不是則沒開蓋，進入state NF or NN
+                            if(label_lines[top_k2[0]].find('nothing') == -1): #沒有找到空，就是有food
+                                str2left = 'NF'
+                            else:
+                                str2left = 'NN'
+                        print('Left：',label_lines[top_k2[0]])
+                        if(i2left == 0):
+                            sequence2left.append(str2left)
+                            stage2left = "Left:Init"
+                            print(stage2left)
+                            i2left+=1
+                        elif(i2left == 1): #!=0的才能開始比較i1right-1
+                            if(str2left == sequence2left[i2left-1]):
+                                twice2left = True #因為stage一樣所以sequence保持原樣，buf也是不動作
+                            else: #str != sequence[i-1]，twice = False、sequence不動(不appand)，新增buf
+                                twice2left = False
+                                buf2left = str2left
+                            i2left+=1
+                        else: #i == 1之後再來比對sequence[i-1]，防止index out of range
+                            if(twice2left == True):#代表上一個沒有buf
+                                if(str2left == sequence2left[len(sequence2left)-1]): #twice = True
+                                    twice2left = True #因為stage一樣所以sequence保持原樣，buf也是不動作
+                                else: #str != sequence[i-1]，twice = False、sequence不動(不appand)，新增buf
+                                    twice2left = False
+                                    buf2left = str2left
+                            else: #twice = False，代表上一個有buf要比對
+                                if(str2left == buf2left): 
+                                    twice2left = True
+                                    if(buf2left != sequence2left[len(sequence2left)-1]): #防止eeeleee = ['e','e']
+                                        sequence2left.append(str2left)
+                                else: #str != buf
+                                    #twice = False，狀態不變就不打了
+                                    buf2left = str2left #buf換人，前一個stage就作廢了<不滿兩次>
+                        print(sequence2left)
+                        if(len(sequence2left) == 3): #集滿3個stage的值之後再來判斷
+                            if(sequence2left == ['NN', 'ON', 'OF']):
+                                #print("Take out")
+                                stage2left = "Left:Take out"
+                            elif(sequence2left == ['NF', 'OF', 'ON']):
+                                #print("Put back")
+                                stage2left = "Left:Put back"
+                            else:
+                                #print("error")
+                                stage2left = "Left: " #先跳過[e,e] [f,f]狀態 看之後要不要用stack儲存連續判定狀況(ex[take,put,put,(中間[e,e]...之類的)])
+                                #continue #跳過此句後剩下的語句，開啟新的循環
+                                pass #不執行東西       
+                            print(stage2left)
+                            sequence2left.pop(0) #最前面的偵測值pop掉，來檢測下一個狀態
+                    #顯示拿出來放回去
+                    if(stage1right != "Right: "):
+                        RightImg = np.zeros((256, 256, 3), np.uint8)
+                        cv2.resizeWindow("Right", 240, 400); #改好視窗大小
+                        cv2.putText(RightImg, stage1right, (10, 150), cv2.FONT_HERSHEY_TRIPLEX, 1, (0, 255, 255), 1, cv2.LINE_AA)
+                        cv2.imshow("Right", RightImg) #imshow會去貼合圖片尺寸來顯示 -> 所以目前還無法維持大一點的視窗 會忽大忽小 所以原本用("Right", 300, 180)、大小還行只是他會改來改去的
+                        cv2.moveWindow("Right", 1450, 500)
+                        if(stage1right != "Right:Init"):
+                            local_time = time.localtime() # 取得時間元組
+                            timeString = time.strftime("%Y%m%d_%H%M%S", local_time) # 轉成想要的字串形式
+                            f = open('D:/st-gcn/record.txt','a')
+                            f.write('\n'+timeString+' '+stage1right+' '+face_name)
+                            f.close()
+                    if(stage2left != "Left: "):
+                        LeftImg = np.zeros((256, 256, 3), np.uint8)
+                        cv2.resizeWindow("Left", 240, 400); #改好視窗大小
+                        cv2.putText(LeftImg, stage2left, (10, 150), cv2.FONT_HERSHEY_TRIPLEX, 1, (0, 255, 255), 1, cv2.LINE_AA)
+                        cv2.imshow("Left", LeftImg) #imshow會去貼合圖片尺寸來顯示 -> 所以目前還無法維持大一點的視窗
+                        cv2.moveWindow("Left", 1450, 760)
+                        if(stage2left != "Left:Init"):
+                            local_time = time.localtime() # 取得時間元組
+                            timeString = time.strftime("%Y%m%d_%H%M%S", local_time) # 轉成想要的字串形式
+                            f = open('D:/st-gcn/record.txt','a')
+                            f.write('\n'+timeString+' '+stage2left+' '+face_name)
+                            f.close()
+                    k+=1
+            photonum += 1        
+            #cv 顯示物品辨識結果 待改 因為現在是三個一辨識 所以顯示的結果就不會realtime實時 感覺會delay
+            cv2.putText(RightHand_img, label_lines[top_k[0]], (10, 150), cv2.FONT_HERSHEY_TRIPLEX, 1, (0, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(LeftHand_img, label_lines[top_k2[0]], (10, 150), cv2.FONT_HERSHEY_TRIPLEX, 1, (0, 255, 255), 1, cv2.LINE_AA)
+            
+            if (voting_label_name == 'liftThelid'):
+                # 裁切區域的 x 與 y 座標（左上角）
+                local_time = time.localtime() # 取得時間元組
+                timeString = time.strftime("%Y%m%d_%H%M%S", local_time) # 轉成想要的字串形式
+                #myphotonum = str(photonum)
+                crop_img = orig_image
+                if (crop_img.size ==  0):#对于这种情况就不要用imwriter
+                    continue
+                else:
+                    cv2.imwrite('D:/st-gcn/LiftTheLid/'+ timeString +'.jpg', crop_img)
+                    
+            orig_image = cv2.resize(
+                orig_image, (256 * source_W // source_H, 256))
+            H, W, _ = orig_image.shape
+
+            
+            # visualization
+            app_fps = 1 / (time.time() - tic)
+            image = self.render(data_numpy, voting_label_name,
+                                video_label_name, intensity, orig_image, app_fps)
+
+            
+            cv2.imshow("ST-GCN", image)
+            
+            # Hit 'q' on the keyboard to quit!
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+        # Release handle to the webcam
+        video_capture.release()
+        video_capture1.release()
+        cv2.destroyAllWindows()
+        
+        # start recognition     
+    
+            
+
+    def predict(self, data):
+        # forward
+        output, feature = self.model.extract_feature(data)
+        output = output[0]
+        feature = feature[0]
+        intensity = (feature*feature).sum(dim=0)**0.5
+        intensity = intensity.cpu().detach().numpy()
+
+        # get result
+        # classification result of the full sequence
+        voting_label = output.sum(dim=3).sum(
+            dim=2).sum(dim=1).argmax(dim=0)
+        voting_label_name = self.label_name[voting_label]
+        # classification result for each person of the latest frame
+        num_person = data.size(4)
+        latest_frame_label = [output[:, :, :, m].sum(
+            dim=2)[:, -1].argmax(dim=0) for m in range(num_person)]
+        latest_frame_label_name = [self.label_name[l]
+                                   for l in latest_frame_label]
+
+        num_person = output.size(3)
+        num_frame = output.size(1)
+        video_label_name = list()
+        for t in range(num_frame):
+            frame_label_name = list()
+            for m in range(num_person):
+                person_label = output[:, t, :, m].sum(dim=1).argmax(dim=0)
+                person_label_name = self.label_name[person_label]
+                frame_label_name.append(person_label_name)
+            video_label_name.append(frame_label_name)
+        return voting_label_name, video_label_name, output, intensity
+
+    def render(self, data_numpy, voting_label_name, video_label_name, intensity, orig_image, fps=0):
+        images = utils.visualization.stgcn_visualize(
+            data_numpy[:, [-1]],
+            self.model.graph.edge,
+            intensity[[-1]], [orig_image],
+            voting_label_name,
+            [video_label_name[-1]],
+            self.arg.height,
+            fps=fps)
+        image = next(images)
+        image = image.astype(np.uint8)
+        return image
+
+    @staticmethod
+    def get_parser(add_help=False):
+
+        # parameter priority: command line > config > default
+        parent_parser = IO.get_parser(add_help=False)
+        parser = argparse.ArgumentParser(
+            add_help=add_help,
+            parents=[parent_parser],
+            description='Demo for Spatial Temporal Graph Convolution Network')
+
+        # region arguments yapf: disable
+        parser.add_argument('--video',
+                            default='./resource/media/test/622007727821640.mp4', #改影片
+                            help='Path to video')
+        parser.add_argument('--openpose',
+                            default='D:\openpose\build\x64\Release',
+                            help='Path to openpose')
+        parser.add_argument('--model_input_frame',
+                            default=128,
+                            type=int)
+        parser.add_argument('--model_fps',
+                            default=30,
+                            type=int)
+        parser.add_argument('--height',
+                            default=1080,
+                            type=int,
+                            help='height of frame in the output video.')
+        parser.set_defaults(
+            config='./config/st_gcn/kinetics-skeleton/demo_realtime.yaml')
+        parser.set_defaults(print_log=False)
+        # endregion yapf: enable
+
+        return parser
+
+class naive_pose_tracker():
+    """ A simple tracker for recording person poses and generating skeleton sequences.
+    For actual occasion, I recommend you to implement a robuster tracker.
+    Pull-requests are welcomed.
+    """
+
+    def __init__(self, data_frame=128, num_joint=18, max_frame_dis=np.inf):
+        self.data_frame = data_frame
+        self.num_joint = num_joint
+        self.max_frame_dis = max_frame_dis
+        self.latest_frame = 0
+        self.trace_info = list()
+
+    def update(self, multi_pose, current_frame):
+        # multi_pose.shape: (num_person, num_joint, 3)
+
+        if current_frame <= self.latest_frame:
+            return
+
+        if len(multi_pose.shape) != 3:
+            return
+
+        score_order = (-multi_pose[:, :, 2].sum(axis=1)).argsort(axis=0)
+        for p in multi_pose[score_order]:
+
+            # match existing traces
+            matching_trace = None
+            matching_dis = None
+            for trace_index, (trace, latest_frame) in enumerate(self.trace_info):
+                # trace.shape: (num_frame, num_joint, 3)
+                if current_frame <= latest_frame:
+                    continue
+                mean_dis, is_close = self.get_dis(trace, p)
+                if is_close:
+                    if matching_trace is None:
+                        matching_trace = trace_index
+                        matching_dis = mean_dis
+                    elif matching_dis > mean_dis:
+                        matching_trace = trace_index
+                        matching_dis = mean_dis
+
+            # update trace information
+            if matching_trace is not None:
+                trace, latest_frame = self.trace_info[matching_trace]
+
+                # padding zero if the trace is fractured
+                pad_mode = 'interp' if latest_frame == self.latest_frame else 'zero'
+                pad = current_frame-latest_frame-1
+                new_trace = self.cat_pose(trace, p, pad, pad_mode)
+                self.trace_info[matching_trace] = (new_trace, current_frame)
+
+            else:
+                new_trace = np.array([p])
+                self.trace_info.append((new_trace, current_frame))
+
+        self.latest_frame = current_frame
+
+    def get_skeleton_sequence(self):
+
+        # remove old traces
+        valid_trace_index = []
+        for trace_index, (trace, latest_frame) in enumerate(self.trace_info):
+            if self.latest_frame - latest_frame < self.data_frame:
+                valid_trace_index.append(trace_index)
+        self.trace_info = [self.trace_info[v] for v in valid_trace_index]
+
+        num_trace = len(self.trace_info)
+        if num_trace == 0:
+            return None
+
+        data = np.zeros((3, self.data_frame, self.num_joint, num_trace))
+        for trace_index, (trace, latest_frame) in enumerate(self.trace_info):
+            end = self.data_frame - (self.latest_frame - latest_frame)
+            d = trace[-end:]
+            beg = end - len(d)
+            data[:, beg:end, :, trace_index] = d.transpose((2, 0, 1))
+
+        return data
+
+    # concatenate pose to a trace
+    def cat_pose(self, trace, pose, pad, pad_mode):
+        # trace.shape: (num_frame, num_joint, 3)
+        num_joint = pose.shape[0]
+        num_channel = pose.shape[1]
+        if pad != 0:
+            if pad_mode == 'zero':
+                trace = np.concatenate(
+                    (trace, np.zeros((pad, num_joint, 3))), 0)
+            elif pad_mode == 'interp':
+                last_pose = trace[-1]
+                coeff = [(p+1)/(pad+1) for p in range(pad)]
+                interp_pose = [(1-c)*last_pose + c*pose for c in coeff]
+                trace = np.concatenate((trace, interp_pose), 0)
+        new_trace = np.concatenate((trace, [pose]), 0)
+        return new_trace
+
+    # calculate the distance between a existing trace and the input pose
+
+    def get_dis(self, trace, pose):
+        last_pose_xy = trace[-1, :, 0:2]
+        curr_pose_xy = pose[:, 0:2]
+
+        mean_dis = ((((last_pose_xy - curr_pose_xy)**2).sum(1))**0.5).mean()
+        wh = last_pose_xy.max(0) - last_pose_xy.min(0)
+        scale = (wh[0] * wh[1]) ** 0.5 + 0.0001
+        is_close = mean_dis < scale * self.max_frame_dis
+        return mean_dis, is_close
