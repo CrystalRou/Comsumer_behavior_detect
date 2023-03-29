@@ -2,7 +2,7 @@
 
 System work flow
 
-![image] (https://github.com/CrystalRou/Comsumer_behavior_detect/blob/main/workflow.png)
+![image](https://github.com/CrystalRou/Comsumer_behavior_detect/blob/main/workflow.png)
 
 This system including three part.
 
